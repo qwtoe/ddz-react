@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { DdzGame } from './game/controller';
 import type { GameState } from './game/controller';
 import type { Card } from './engine/types';
-import { PlayingCard, cardLabel } from './ui/PlayingCard';
+import { PlayingCard } from './ui/PlayingCard';
+import { cardLabel } from './ui/cardPresentation';
 import { sfx, initMuteState, setMuted, announcePlay, speak, unlockAudio, resumeOnVisible } from './ui/sounds';
 
 function useGame(game: DdzGame): GameState {
@@ -30,18 +31,30 @@ function lastActionPerSeat(state: GameState) {
 }
 
 export default function App() {
-  const gameRef = useRef<DdzGame | null>(null);
-  if (!gameRef.current)
-    gameRef.current = new DdzGame({
-      aiDelayMs: 3000,
-      onBid: (_seat, score) => speak(score === 0 ? '不叫' : `${score} 分`),
-    });
-  const game = gameRef.current;
+  // 惰性创建唯一实例：渲染期不再读写 ref（消除 react(refs) 警告）
+  const [game] = useState(() => new DdzGame({
+    aiDelayMs: 3000,
+    onBid: (_seat, score) => speak(score === 0 ? '不叫' : `${score} 分`),
+  }));
   const state = useGame(game);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [invalidMsg, setInvalidMsg] = useState('');
   const [muteUi, setMuteUi] = useState(() => initMuteState());
+  const [rotateDismissed, setRotateDismissed] = useState(false);
+
+  // 卸载时释放游戏实例（清 AI 定时器与订阅，由 controller 的 dispose 负责）
+  useEffect(() => {
+    return () => game.dispose();
+  }, [game]);
+
+  // 换局时清空选择与错误提示：渲染期派生，避免 effect 内同步 setState
+  const [prevPhase, setPrevPhase] = useState(state.phase);
+  if (prevPhase !== state.phase) {
+    setPrevPhase(state.phase);
+    setSelected(new Set());
+    setInvalidMsg('');
+  }
 
   // 移动端：首次用户手势解锁音频与语音；切回前台恢复音频
   useEffect(() => {
@@ -88,12 +101,6 @@ export default function App() {
     };
   }, [state]);
 
-  // 换局时清空选择
-  useEffect(() => {
-    setSelected(new Set());
-    setInvalidMsg('');
-  }, [state.phase]);
-
   const hand = state.phase !== 'idle' ? game.getHand(0) : [];
   const { res: lastPlays, pass: lastPass } = lastActionPerSeat(state);
   const myTurn =
@@ -110,6 +117,34 @@ export default function App() {
       return next;
     });
   };
+
+  const handRef = useRef<HTMLDivElement>(null);
+
+  // 把最右侧选中牌滚进手牌视野（提示选牌可能落在屏幕外）
+  const scrollSelectedIntoView = () => {
+    const container = handRef.current;
+    if (!container) return;
+    const sel = container.querySelectorAll<HTMLElement>('[data-card-id].is-selected');
+    const last = sel[sel.length - 1];
+    if (!last) return;
+    const cardLeft = last.offsetLeft;
+    const cardRight = cardLeft + last.offsetWidth;
+    const viewLeft = container.scrollLeft;
+    const viewRight = viewLeft + container.clientWidth;
+    if (cardRight > viewRight || cardLeft < viewLeft) {
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      container.scrollTo({
+        left: Math.max(0, cardRight - container.clientWidth + 16),
+        behavior: reduce ? 'auto' : 'smooth',
+      });
+    }
+  };
+
+  // 选牌变化后（含「提示」）自动滚动；尊重 prefers-reduced-motion
+  useEffect(() => {
+    const raf = requestAnimationFrame(scrollSelectedIntoView);
+    return () => cancelAnimationFrame(raf);
+  }, [selected]);
 
   const onHint = () => {
     const h = game.hint();
@@ -138,6 +173,8 @@ export default function App() {
     } else {
       sfx.pass();
       speak('不要');
+      setSelected(new Set());
+      setInvalidMsg('');
     }
   };
 
@@ -169,7 +206,10 @@ export default function App() {
         <div className="topbar-title">🃏 欢乐斗地主 · 人机对战</div>
         <div className="topbar-info">
           <button
+            type="button"
             className="btn btn-ghost btn-mute"
+            aria-label={muteUi ? '开启音效' : '关闭音效'}
+            aria-pressed={muteUi}
             title={muteUi ? '开启音效' : '关闭音效'}
             onClick={onToggleMute}
           >
@@ -210,7 +250,7 @@ export default function App() {
 
         {/* 中央 */}
         <section className="center">
-          <div className="center-msg">
+          <div className="center-msg" aria-live="polite">
             {state.phase === 'bidding' && (
               <p className="hint-text">
                 {state.currentPlayer === 0
@@ -240,10 +280,11 @@ export default function App() {
         <div className="controls">
           {state.phase === 'bidding' && myTurn && (
             <>
-              <button className="btn btn-ghost" onClick={() => onBid(0)}>不叫</button>
+              <button type="button" className="btn btn-ghost" onClick={() => onBid(0)}>不叫</button>
               {[1, 2, 3].map(s => (
                 <button
                   key={s}
+                  type="button"
                   className="btn btn-primary"
                   disabled={s <= state.currentBid}
                   onClick={() => onBid(s as 1 | 2 | 3)}
@@ -255,15 +296,17 @@ export default function App() {
           )}
           {state.phase === 'playing' && myTurn && (
             <>
-              <button className="btn btn-ghost" onClick={onHint}>💡 提示</button>
+              <button type="button" className="btn btn-ghost" onClick={onHint}>💡 提示</button>
               <button
-                className="btn btn-danger"
+                type="button"
+                className="btn btn-skip"
                 disabled={!canPass(state)}
                 onClick={onPass}
               >
                 不要
               </button>
               <button
+                type="button"
                 className="btn btn-primary"
                 disabled={!selected.size}
                 onClick={onPlay}
@@ -272,10 +315,15 @@ export default function App() {
               </button>
             </>
           )}
-          {invalidMsg && <span className="invalid-msg">{invalidMsg}</span>}
+          {invalidMsg && <span className="invalid-msg" role="status">{invalidMsg}</span>}
         </div>
 
-        <div className="hand">
+        <div
+          className="hand"
+          ref={handRef}
+          role="group"
+          aria-label="我的手牌"
+        >
           {hand.map(c => (
             <PlayingCard
               key={c.id}
@@ -300,7 +348,7 @@ export default function App() {
           <div className="panel panel-start">
             <h1>🃏 欢乐斗地主</h1>
             <p>与两位 AI 对战 · 经典规则</p>
-            <button className="btn btn-primary btn-lg" onClick={onStart}>
+            <button type="button" className="btn btn-primary btn-lg" onClick={onStart}>
               开始游戏
             </button>
           </div>
@@ -311,7 +359,7 @@ export default function App() {
       {state.phase === 'over' && (
         <div className="overlay">
           <div className="panel panel-settle">
-            <h1 className={iWon(state) ? 'win' : 'lose'}>
+            <h1 className={iWon(state) ? 'win' : 'lose'} role="status">
               {iWon(state) ? '🏆 胜利！' : '💔 失败'}
             </h1>
             <p className="settle-sub">
@@ -331,8 +379,25 @@ export default function App() {
                 ))}
               </tbody>
             </table>
-            <button className="btn btn-primary btn-lg" onClick={onStart}>
+            <button type="button" className="btn btn-primary btn-lg" onClick={onStart}>
               再来一局
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 手机竖屏引导（仅会话内记忆；转回横屏由媒体查询自动隐藏） */}
+      {!rotateDismissed && (
+        <div className="rotate-guard" role="dialog" aria-label="请横屏游玩">
+          <div className="rotate-guard-box">
+            <span className="rotate-icon" aria-hidden="true">📱</span>
+            <p className="rotate-text">请将手机横过来，牌会更大、更好点。</p>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => setRotateDismissed(true)}
+            >
+              仍然继续
             </button>
           </div>
         </div>
