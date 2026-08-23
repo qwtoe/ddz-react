@@ -11,13 +11,21 @@ let muted = false;
 const MUTE_KEY = 'ddz-muted';
 
 export function initMuteState(): boolean {
-  muted = localStorage.getItem(MUTE_KEY) === '1';
+  try {
+    muted = localStorage.getItem(MUTE_KEY) === '1';
+  } catch {
+    muted = false; // 读取失败默认不静音
+  }
   return muted;
 }
 
 export function setMuted(m: boolean): void {
   muted = m;
-  localStorage.setItem(MUTE_KEY, m ? '1' : '0');
+  try {
+    localStorage.setItem(MUTE_KEY, m ? '1' : '0');
+  } catch {
+    /* 写入失败静默忽略 */
+  }
 }
 
 export function isMuted(): boolean {
