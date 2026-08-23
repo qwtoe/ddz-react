@@ -102,12 +102,22 @@ export function findHints(hand: Card[], last: CardPattern | null): Card[][] {
           push(body);
           continue;
         }
-        // 翼牌：从主体外选最小的 m 张单/对
+        if (wings === 'single') {
+          // 方案A：m 张单翼允许来自同一外点数（不超过该点数实际张数，且不得取自飞机主体点数）
+          const flat: Card[] = [];
+          for (const r of ranks) {
+            if (used.has(r)) continue;
+            flat.push(...g.get(r)!);
+          }
+          flat.sort((a, b) => a.rank - b.rank);
+          if (flat.length >= m) push([...body, ...flat.slice(0, m)]);
+          continue;
+        }
+        // 翼牌：对子，从主体外选最小的 m 对（解析器要求各对点数不同）
         const wingPool: Card[][] = [];
         for (const r of ranks) {
           if (used.has(r)) continue;
-          if (wings === 'single') wingPool.push(pick(r, 1));
-          else if (has(r, 2)) wingPool.push(pick(r, 2));
+          if (has(r, 2)) wingPool.push(pick(r, 2));
         }
         wingPool.sort((a, b) => a[0].rank - b[0].rank);
         if (wingPool.length >= m) {
@@ -135,6 +145,13 @@ export function findHints(hand: Card[], last: CardPattern | null): Card[][] {
       }
       pool.sort((a, b) => a[0].rank - b[0].rank);
       if (pool.length >= 2) push([...body, ...pool.slice(0, 2).flat()]);
+      // 方案A：两张单翼允许来自同一点数（该点数 ≥2 张，如 3333+55 的一对 5 当两张单牌）
+      if (wings === 'single') {
+        for (const w of ranks) {
+          if (w === r || !has(w, 2)) continue;
+          push([...body, ...pick(w, 2)]);
+        }
+      }
     }
   };
 
