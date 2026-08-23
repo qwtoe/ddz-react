@@ -145,7 +145,6 @@ body {
   margin: 0;
   display: block;
   font: inherit;
-  color: inherit;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
