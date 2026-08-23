@@ -42,12 +42,15 @@ export interface GameState {
 interface GameOptions {
   aiDelayMs?: number;
   autoPlay?: boolean;
+  /** 可注入的随机数发生器（默认 Math.random），用于发牌/叫分次序，测试可复现 */
+  rng?: () => number;
   /** 每次叫分后触发（含 AI），参数为座位与叫分（0=不叫） */
   onBid?: (seat: Seat, score: 0 | 1 | 2 | 3) => void;
 }
 
 export class DdzGame {
   private opts: Required<Pick<GameOptions, 'aiDelayMs' | 'autoPlay'>>;
+  private rng: () => number;
   private onBidCb: ((seat: Seat, score: 0 | 1 | 2 | 3) => void) | null = null;
   private listeners = new Set<(s: GameState) => void>();
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -76,6 +79,7 @@ export class DdzGame {
 
   constructor(opts: GameOptions = {}) {
     this.opts = { aiDelayMs: 600, autoPlay: true, ...opts };
+    this.rng = opts.rng ?? Math.random;
     this.onBidCb = opts.onBid ?? null;
     this.cachedState = this.buildState();
   }
@@ -138,6 +142,13 @@ export class DdzGame {
     };
   }
 
+  /** 销毁：清除挂起的 AI timer、作废所有回调、清空监听器。之后任何 timer 回调都不会再变更状态 */
+  dispose(): void {
+    this.clearTimer();
+    this.gen++;
+    this.listeners.clear();
+  }
+
   private emit() {
     this.cachedState = this.buildState();
     const s = this.cachedState;
@@ -154,7 +165,7 @@ export class DdzGame {
   start(): void {
     this.clearTimer();
     const gen = ++this.gen;
-    const deck = shuffle(createDeck());
+    const deck = shuffle(createDeck(), this.rng);
     this.hands = [
       sortHand(deck.slice(0, 17)),
       sortHand(deck.slice(17, 34)),
@@ -168,7 +179,7 @@ export class DdzGame {
     this.currentPlayer = null;
     this.bidMax = 0;
     this.bidWinner = null;
-    this.bidTurn = (Math.floor(Math.random() * 3)) as Seat;
+    this.bidTurn = (Math.floor(this.rng() * 3)) as Seat;
     this.bidCount = 0;
     this.currentPlayer = this.bidTurn;
     this.bombCount = 0;
@@ -220,9 +231,13 @@ export class DdzGame {
   /** 出牌。返回 false 表示非法（不出牌不变更状态） */
   play(cardIds: string[]): boolean {
     if (this.phase !== 'playing' || this.currentPlayer === null) return false;
+    if (cardIds.length === 0) return false;
+    // 防御：含重复牌 ID 时非法（重复单张不能凑对子/三张/炸弹）
+    if (new Set(cardIds).size !== cardIds.length) return false;
     const gen = this.gen;
     const seat = this.currentPlayer;
-    const byId = new Map(this.hands[seat].map(c => [c.id, c]));    const cards: Card[] = [];
+    const byId = new Map(this.hands[seat].map(c => [c.id, c]));
+    const cards: Card[] = [];
     for (const id of cardIds) {
       const c = byId.get(id);
       if (!c) return false;
