@@ -1,12 +1,19 @@
 /**
  * 轻量音效模块：Web Audio API 实时合成，无外部音频资源。
- * 浏览器自动播放策略要求首次用户交互后才能出声——首次点击"开始游戏"即完成解锁。
+ * 浏览器自动播放策略要求首次用户交互后才能出声——首次手势即完成解锁。
  */
 
 import { parseCards } from '../engine/pattern';
 
 let ctx: AudioContext | null = null;
 let muted = false;
+// 会话内是否已发生过解锁手势（iOS 要求手势内解锁 AudioContext 与 TTS）
+let userGestured = false;
+// TTS 是否已做过一次性预热（避免每次手势都 cancel/播空格打断报牌队列）
+let ttsWarmed = false;
+// 语音失败标志：API 不可用 / 无中文语音 / speak 抛错后置位，不再反复无效调用
+let voiceBroken = false;
+let voiceWarned = false;
 
 const MUTE_KEY = 'ddz-muted';
 
@@ -32,47 +39,67 @@ export function isMuted(): boolean {
   return muted;
 }
 
-function ac(): AudioContext | null {
-  if (muted) return null;
+type AudioCtor = typeof AudioContext;
+
+/** 兼容旧版 iOS/WebView 的 AudioContext 构造函数（webkitAudioContext 回退） */
+function audioCtor(): AudioCtor | null {
+  const w = window as unknown as { AudioContext?: AudioCtor; webkitAudioContext?: AudioCtor };
+  return w.AudioContext ?? w.webkitAudioContext ?? null;
+}
+
+/** iOS 切后台/锁屏后 AudioContext 可能进入 interrupted，与 suspended 一样需要恢复 */
+function needsResume(state: AudioContextState): boolean {
+  return state === 'suspended' || state === 'interrupted';
+}
+
+/** 惰性创建 AudioContext（仅一次），并监听 statechange：interrupted/suspended 自动尝试恢复 */
+function ensureCtx(): AudioContext | null {
+  if (ctx) return ctx;
+  const AC = audioCtor();
+  if (!AC) return null;
   try {
-    if (!ctx) {
-      const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      ctx = new AC();
-    }
-    if (ctx.state === 'suspended') void ctx.resume();
-    return ctx;
+    const c = new AC();
+    c.addEventListener('statechange', () => {
+      if (needsResume(c.state)) void c.resume().catch(() => {});
+    });
+    ctx = c;
   } catch {
     return null;
   }
+  return ctx;
+}
+
+function ac(): AudioContext | null {
+  if (muted) return null;
+  const c = ensureCtx();
+  if (!c) return null;
+  if (needsResume(c.state)) void c.resume().catch(() => {});
+  return c;
 }
 
 /**
  * 移动端浏览器（iOS/Android）要求在用户手势内解锁 AudioContext 与语音合成。
- * 在首次点击/触摸时调用一次，之后所有音效与语音才可正常播放。
+ * 每次手势调用本函数；内部只做一次 TTS 预热，之后的手势不再 cancel、不再播空格。
  */
 export function unlockAudio(): void {
+  if (muted) return;
+  userGestured = true;
   try {
-    if (!muted && !ctx && 'AudioContext' in window) {
-      const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      ctx = new AC();
-    }
-    if (ctx && ctx.state === 'suspended') void ctx.resume();
-    // 预热语音合成：iOS 需要在手势内 speak 一次才解锁
-    if (!muted && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const warm = new SpeechSynthesisUtterance(' ');
-      warm.lang = 'zh-CN';
-      window.speechSynthesis.speak(warm);
+    const c = ensureCtx();
+    if (c && needsResume(c.state)) void c.resume().catch(() => {});
+    if (!ttsWarmed) {
+      ttsWarmed = true;
+      warmTts();
     }
   } catch {
     /* 忽略解锁失败 */
   }
 }
 
-/** 页面从后台回到前台时恢复音频（移动端切后台会挂起 AudioContext） */
+/** 页面从后台回到前台时恢复音频（iOS 切后台/锁屏会挂起或打断 AudioContext） */
 export function resumeOnVisible(): void {
   try {
-    if (ctx && ctx.state === 'suspended') void ctx.resume();
+    if (ctx && needsResume(ctx.state)) void ctx.resume().catch(() => {});
   } catch {
     /* ignore */
   }
@@ -202,6 +229,33 @@ function patternText(kind: string, keyRank: number): string {
   }
 }
 
+/** 标记语音通道失败并仅告警一次 */
+function markVoiceBroken(reason: string): void {
+  if (voiceBroken) return;
+  voiceBroken = true;
+  if (!voiceWarned) {
+    voiceWarned = true;
+    console.warn(`[sounds] 语音报牌不可用：${reason}`);
+  }
+}
+
+/** 手势内一次性预热语音合成（iOS 需在用户手势内 speak 一次才解锁） */
+function warmTts(): void {
+  try {
+    if (!('speechSynthesis' in window)) {
+      markVoiceBroken('speechSynthesis 不可用');
+      return;
+    }
+    const ss = window.speechSynthesis;
+    ss.cancel();
+    const warm = new SpeechSynthesisUtterance(' ');
+    warm.lang = 'zh-CN';
+    ss.speak(warm);
+  } catch {
+    markVoiceBroken('TTS 预热失败');
+  }
+}
+
 /** 出牌时语音播报牌型，如"对2""炸弹" */
 export function announcePlay(cards: import('../engine/types').Card[]): void {
   const p = parseCards(cards);
@@ -212,20 +266,31 @@ export function announcePlay(cards: import('../engine/types').Card[]): void {
 /** 用中文语音播报文本；静音时跳过 */
 export function speak(text: string): void {
   if (muted || !text) return;
+  // 会话内尚未发生过解锁手势时静默跳过（iOS 非手势触发的语音可能被拦截），不反复尝试
+  if (!userGestured) return;
+  if (voiceBroken) return;
   try {
-    if (!('speechSynthesis' in window)) return;
+    if (!('speechSynthesis' in window)) {
+      markVoiceBroken('speechSynthesis 不可用');
+      return;
+    }
+    const ss = window.speechSynthesis;
+    const voices = ss.getVoices();
+    const zhVoice = voices.find(v => v.lang.toLowerCase().startsWith('zh'));
+    // 语音列表已加载但无中文语音：视为无效通道，避免每手都发无效调用
+    if (voices.length > 0 && !zhVoice) {
+      markVoiceBroken('未找到中文语音');
+      return;
+    }
     // 打断上一条，避免连播堆积
-    window.speechSynthesis.cancel();
+    ss.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'zh-CN';
     u.rate = 1.15;
     u.pitch = 1;
-    const zhVoice = window.speechSynthesis
-      .getVoices()
-      .find(v => v.lang.toLowerCase().startsWith('zh'));
     if (zhVoice) u.voice = zhVoice;
-    window.speechSynthesis.speak(u);
+    ss.speak(u);
   } catch {
-    /* 语音不可用时静默忽略 */
+    markVoiceBroken('speak 抛错');
   }
 }
