@@ -28,7 +28,9 @@ function cost(cards: Card[]): number {
 export function decompose(hand: Card[]): Card[][] {
   const g = new Map<Card['rank'], Card[]>();
   for (const [r, cards] of groupByRank(hand)) g.set(r, [...cards]);
-  const has = (r: number, n: number) => (g.get(r as Card['rank'])?.length ?? 0) >= n && r <= 14;
+  const has = (r: number, n: number) => (g.get(r as Card['rank'])?.length ?? 0) >= n;
+  // 连续牌型（顺子/连对/飞机）仅扫描 3~A，王炸等不受该上限限制
+  const hasRun = (r: number, n: number) => r <= 14 && has(r, n);
   const take = (r: number, n: number): Card[] => {
     const arr = g.get(r as Card['rank'])!;
     return arr.splice(0, n);
@@ -49,7 +51,7 @@ export function decompose(hand: Card[]): Card[][] {
     let found = false;
     for (let start = 3; start + 1 <= 14; start++) {
       let len = 0;
-      while (start + len <= 14 && has(start + len, 3)) len++;
+      while (start + len <= 14 && hasRun(start + len, 3)) len++;
       if (len >= 2) {
         const run: Card[] = [];
         for (let r = start; r < start + Math.min(len, 5); r++) run.push(...take(r, 3));
@@ -66,7 +68,7 @@ export function decompose(hand: Card[]): Card[][] {
     let found = false;
     for (let start = 3; start + 4 <= 14; start++) {
       let len = 0;
-      while (start + len <= 14 && has(start + len, 1)) len++;
+      while (start + len <= 14 && hasRun(start + len, 1)) len++;
       if (len >= 5) {
         const run: Card[] = [];
         for (let r = start; r < start + Math.min(len, 12); r++) run.push(...take(r, 1));
@@ -83,7 +85,7 @@ export function decompose(hand: Card[]): Card[][] {
     let found = false;
     for (let start = 3; start + 2 <= 14; start++) {
       let len = 0;
-      while (start + len <= 14 && has(start + len, 2)) len++;
+      while (start + len <= 14 && hasRun(start + len, 2)) len++;
       if (len >= 3) {
         const run: Card[] = [];
         for (let r = start; r < start + Math.min(len, 10); r++) run.push(...take(r, 2));
